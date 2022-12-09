@@ -22,7 +22,7 @@ import utils.video_utils as video_utils
 
 
 # loss.backward(layer) <- original implementation did it like this it's equivalent to MSE(reduction='sum')/2
-def gradient_ascent(config, model, input_tensor, layer_ids_to_use, iteration):
+def gradient_ascent(config, model, input_tensor, layer_ids_to_use, iteration, guide_activations=None):
     # Step 0: Feed forward pass
     out = model(input_tensor)
 
@@ -31,13 +31,28 @@ def gradient_ascent(config, model, input_tensor, layer_ids_to_use, iteration):
 
     # Step 2: Calculate loss over activations
     losses = []
-    for layer_activation in activations:
-        # Use torch.norm(torch.flatten(layer_activation), p) with p=2 for L2 loss and p=1 for L1 loss.
-        # But I'll use the MSE as it works really good, I didn't notice any serious change when going to L1/L2.
-        # using torch.zeros_like as if we wanted to make activations as small as possible but we'll do gradient ascent
-        # and that will cause it to actually amplify whatever the network "sees" thus yielding the famous DeepDream look
-        loss_component = torch.nn.MSELoss(reduction='mean')(layer_activation, torch.zeros_like(layer_activation))
-        losses.append(loss_component)
+    if guide_activations is None:
+        for layer_activation in activations:
+            # Use torch.norm(torch.flatten(layer_activation), p) with p=2 for L2 loss and p=1 for L1 loss.
+            # But I'll use the MSE as it works really good, I didn't notice any serious change when going to L1/L2.
+            # using torch.zeros_like as if we wanted to make activations as small as possible but we'll do gradient ascent
+            # and that will cause it to actually amplify whatever the network "sees" thus yielding the famous DeepDream look
+            loss_component = torch.nn.MSELoss(reduction='mean')(layer_activation, torch.zeros_like(layer_activation))
+            losses.append(loss_component)
+    else:
+        for layer_activation, guide_activation in zip(activations, guide_activations):
+            ch = layer_activation.shape[-1]
+
+            layer_activation = torch.reshape(layer_activation, (ch, -1))
+            guide_activation = torch.reshape(guide_activation, (ch, -1))
+
+            dot = torch.matmul(torch.transpose(layer_activation, 0, 1), guide_activation)
+            i = torch.unsqueeze(torch.argmax(dot, dim=1), 0)
+
+            max_act = torch.gather(guide_activation, dim=1, index=i)
+            loss_component = torch.mean(max_act)
+            # loss_component = torch.mean(dot, dim=(0, 1))
+            losses.append(loss_component)
 
     loss = torch.mean(torch.stack(losses))
     loss.backward()
@@ -65,7 +80,7 @@ def gradient_ascent(config, model, input_tensor, layer_ids_to_use, iteration):
     input_tensor.data = torch.max(torch.min(input_tensor, UPPER_IMAGE_BOUND), LOWER_IMAGE_BOUND)
 
 
-def deep_dream_static_image(config, img):
+def deep_dream_static_image(config, img, guide_img=None):
     model = utils.fetch_and_prepare_model(config['model_name'], config['pretrained_weights'], DEVICE)
     try:
         layer_ids_to_use = [model.layer_names.index(layer_name) for layer_name in config['layers_to_use']]
@@ -82,21 +97,34 @@ def deep_dream_static_image(config, img):
             shape = img.shape
             img = np.random.uniform(low=0.0, high=1.0, size=shape).astype(np.float32)
 
-    img = utils.pre_process_numpy_img(img)
+    img = utils.pre_process_numpy_img(img, facenet=config["model_name"]=="FACENET")
     base_shape = img.shape[:-1]  # save initial height and width
+
+    # Get guide activations if specified
+    guide_activations = None
+    if guide_img is not None:
+        guide_img = utils.load_image(guide_img, target_shape=config['img_width'])
+        # guide_img = cv.resize(guide_img, (img.shape[1], img.shape[0]))
+        guide_img = utils.pre_process_numpy_img(guide_img, facenet=config["model_name"]=="FACENET")
+
+        guide_input_tensor = utils.pytorch_input_adapter(guide_img, DEVICE,
+            facenet=config["model_name"]=="FACENET")
+        out = model(guide_input_tensor)
+        guide_activations = [out[layer_id_to_use] for layer_id_to_use in layer_ids_to_use]
 
     # Note: simply rescaling the whole result (and not only details, see original implementation) gave me better results
     # Going from smaller to bigger resolution (from pyramid top to bottom)
     for pyramid_level in range(config['pyramid_size']):
         new_shape = utils.get_new_shape(config, base_shape, pyramid_level)
         img = cv.resize(img, (new_shape[1], new_shape[0]))
-        input_tensor = utils.pytorch_input_adapter(img, DEVICE)
+        input_tensor = utils.pytorch_input_adapter(img, DEVICE,
+                                                   facenet=config["model_name"]=="FACENET")
 
         for iteration in range(config['num_gradient_ascent_iterations']):
             h_shift, w_shift = np.random.randint(-config['spatial_shift_size'], config['spatial_shift_size'] + 1, 2)
             input_tensor = utils.random_circular_spatial_shift(input_tensor, h_shift, w_shift)
 
-            gradient_ascent(config, model, input_tensor, layer_ids_to_use, iteration)
+            gradient_ascent(config, model, input_tensor, layer_ids_to_use, iteration, guide_activations)
 
             input_tensor = utils.random_circular_spatial_shift(input_tensor, h_shift, w_shift, should_undo=True)
 
@@ -195,6 +223,7 @@ if __name__ == "__main__":
     parser.add_argument("--pyramid_ratio", type=float, help="Ratio of image sizes in the pyramid", default=1.8)
     parser.add_argument("--num_gradient_ascent_iterations", type=int, help="Number of gradient ascent iterations", default=10)
     parser.add_argument("--lr", type=float, help="Learning rate i.e. step size in gradient ascent", default=0.09)
+    parser.add_argument("--guide_img", type=str, help="Path to guide image", default=None)
 
     # deep_dream_video_ouroboros specific arguments (ignore for other 2 functions)
     parser.add_argument("--create_ouroboros", action='store_true', help="Create Ouroboros video (default False)")
@@ -232,7 +261,7 @@ if __name__ == "__main__":
 
     else:  # Create a static DeepDream image
         print('Dreaming started!')
-        img = deep_dream_static_image(config, img=None)  # img=None -> will be loaded inside of deep_dream_static_image
+        img = deep_dream_static_image(config, img=None, guide_img=args.guide_img)  # img=None -> will be loaded inside of deep_dream_static_image
         dump_path = utils.save_and_maybe_display_image(config, img)
         print(f'Saved DeepDream static image to: {os.path.relpath(dump_path)}\n')
 

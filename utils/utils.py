@@ -15,6 +15,9 @@ from models.definitions.vggs import Vgg16, Vgg16Experimental
 from models.definitions.googlenet import GoogLeNet
 from models.definitions.resnets import ResNet50
 from models.definitions.alexnet import AlexNet
+from models.definitions.facenets import InceptionResnetV1
+from torchvision.models import ResNet50_Weights
+
 from .constants import *
 
 
@@ -42,9 +45,19 @@ def load_image(img_path, target_shape=None):
     return img
 
 
-def pre_process_numpy_img(img):
+def prewhiten(x):
+    mean = np.mean(x)
+    std = np.std(x)
+    std_adj = np.maximum(std, 1.0/np.sqrt(x.size))
+    y = np.multiply(np.subtract(x, mean), 1/std_adj)
+    return y
+
+
+def pre_process_numpy_img(img, facenet=False):
     assert isinstance(img, np.ndarray), f'Expected numpy image got {type(img)}'
 
+    # if facenet:
+    #     return prewhiten(img)
     img = (img - IMAGENET_MEAN_1) / IMAGENET_STD_1  # normalize image
     return img
 
@@ -63,9 +76,14 @@ def post_process_numpy_img(img):
     return img
 
 
-def pytorch_input_adapter(img, device):
+def pytorch_input_adapter(img, device, facenet=False):
     # shape = (1, 3, H, W)
-    tensor = transforms.ToTensor()(img).to(device).unsqueeze(0)
+    img = transforms.ToTensor()(img)
+    # if facenet:
+    #     weights = ResNet50_Weights.DEFAULT
+    #     img = weights.transforms()(img)
+
+    tensor = img.to(device).unsqueeze(0)
     tensor.requires_grad = True
     return tensor
 
@@ -132,6 +150,12 @@ def fetch_and_prepare_model(model_type, pretrained_weights, device):
         model = ResNet50(pretrained_weights, requires_grad=False, show_progress=True).to(device)
     elif model_type == SupportedModels.ALEXNET.name:
         model = AlexNet(pretrained_weights, requires_grad=False, show_progress=True).to(device)
+    elif model_type == SupportedModels.FACENET.name:
+        print("NOTE: using default facenet weights and not loading specified weights from path")
+        model = InceptionResnetV1(pretrained='casia-webface').eval().to(device)
+        # model = InceptionResnetV1(pretrained='casia-webface').eval()
+        # model = model.to(device)
+
     else:
         raise Exception('Model not yet supported.')
     return model

@@ -29,11 +29,13 @@ class SupportedModels(enum.Enum):
     GOOGLENET = 2
     RESNET50 = 3
     ALEXNET = 4
+    FACENET = 5
 
 
 class SupportedPretrainedWeights(enum.Enum):
     IMAGENET = 0
     PLACES_365 = 1
+    VGGFACE = 2
 
 
 SUPPORTED_VIDEO_FORMATS = ['.mp4']
